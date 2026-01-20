@@ -1,0 +1,40 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+USE_PROCD=1
+PROG=/usr/bin/band_steering
+
+start_function ()
+{
+    if [ "$(uci get wireless.default_radio0.band_steering)" = "1" ] && [ "$(uci get wireless.default_radio1.band_steering)" = "1" ]; then
+        procd_open_instance
+        procd_set_param respawn
+        procd_set_param command "$PROG"
+        procd_close_instance
+        echo "start band_steering" >> /tmp/band_steering.log
+    fi
+}
+
+stop_function ()
+{
+    kill `ps | grep band_steering | awk '{print $1}'`
+    echo "stop band_steering" >> /tmp/bnad_steering.log
+}
+
+start_service ()
+{
+    start_function
+}
+
+stop_service ()
+{
+    stop_function
+}
+
+restart_service ()
+{
+    stop_function
+    start_function
+}
+

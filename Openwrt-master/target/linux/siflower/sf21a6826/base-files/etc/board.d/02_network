@@ -1,0 +1,83 @@
+
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+siflower_setup_interfaces()
+{
+	local board="$1"
+
+	case $board in
+	siflower,sf21a6826-evb)
+		ucidef_add_switch "switch0" \
+				  "0:lan" "1:lan" "2:lan" "3:lan" "5@eth4"
+		ucidef_set_interface_lan 'eth0 eth1 eth2 eth4.1 eth5'
+		ucidef_set_interface_wan 'eth3'
+		;;
+	siflower,sf21a6826-fpga)
+		ucidef_set_interface_lan 'eth0 eth1 eth2 eth3'
+		ucidef_set_interface_wan 'eth4'
+		;;
+	siflower,sf21a6826-pw231_demo|\
+	siflower,sf21a6826-6826sg|\
+	siflower,sf21a6826-6826sg_v4|\
+	siflower,sf21a6826-6826sg_v4-nand|\
+	siflower,sf21a6826-6826sgsrb|\
+	siflower,sf21a6826-6826sgsrb-nand|\
+	siflower,sf21a6826-6826sgsrb_v4|\
+	siflower,sf21a6826-6826sgsrb_v4-nand|\
+	siflower,sf21a6826-6826sg2_v4|\
+	siflower,sf21a6826-6826sg2_v4-nand|\
+	siflower,sf21a6826-6826sg2_v4-easymesh)
+		ucidef_set_interface_lan 'eth0 eth1 eth2'
+		ucidef_set_interface_wan 'eth3'
+		;;
+	siflower,sf21a6826-pw231_demo-easymesh)
+		ucidef_add_switch "switch0" \
+				  "0:lan1" "1:lan2" "2:lan3" "3:wan" "5@eth0"
+		ucidef_set_interface_lan 'eth0.1 eth0.2 eth0.3'
+		ucidef_set_interface_wan 'eth0.4'
+		;;
+	siflower,sf21a6826-pw231_demo_switch)
+		ucidef_add_switch "switch0" \
+				  "0:lan" "1:lan" "2:lan" "3:wan" "5@eth0"
+		ucidef_set_interface_lan 'eth0.1'
+		ucidef_set_interface_wan 'eth0.2'
+		;;
+	siflower,sf21a6826-6826sg_ap)
+		ucidef_set_interface_lan 'eth0 eth1'
+		;;
+	siflower,sf21a6826-6826sg2_v4_zhaoyue)
+		ucidef_set_interface_lan 'eth0 eth1 eth2 eth4 eth5'
+		ucidef_set_interface_wan 'eth3'
+		;;
+	*)
+		ucidef_set_interfaces_lan_wan 'eth0 eth1 eth2 eth3' 'eth4'
+		;;
+	esac
+
+    ucidef_set_interface_guest 'guest'
+}
+
+siflower_setup_macs()
+{
+	local board="$1"
+
+	case $board in
+	siflower,sf21a6826-pw231_demo-easymesh|\
+	siflower,sf21a6826-pw231_demo_switch)
+		lan_mac=$(mtd_get_mac_binary factory 0)
+		local wan_mac=$(macaddr_add "$lan_mac" 1)
+		;;
+	esac
+	[ -n "$lan_mac" ] && ucidef_set_interface_macaddr "lan" $lan_mac
+	[ -n "$wan_mac" ] && ucidef_set_interface_macaddr "wan" $wan_mac
+}
+
+board_config_update
+board=$(board_name)
+siflower_setup_interfaces $board
+siflower_setup_macs $board
+board_config_flush
+
+exit 0

@@ -1,0 +1,24 @@
+Index: hostapd-2022-01-16-cff80b4f/src/ap/dfs.c
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/src/ap/dfs.c
++++ hostapd-2022-01-16-cff80b4f/src/ap/dfs.c
+@@ -930,7 +930,9 @@ int hostapd_dfs_complete_cac(struct host
+ 				iface->cac_started = 0;
+ 			}
+ 		}
+-	} else {
++	}
++#if 0
++	else {
+ 		/*
+ 		 * add by austin.xu:
+ 		 * If we switch a channel from a dfs channel which doesn't
+@@ -948,7 +950,7 @@ int hostapd_dfs_complete_cac(struct host
+ 		*/
+ 		hostapd_setup_interface_complete(iface, 1);
+ 	}
+-
++#endif
+ 	return 0;
+ }
+ 

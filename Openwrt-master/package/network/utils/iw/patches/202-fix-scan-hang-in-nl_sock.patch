@@ -1,0 +1,82 @@
+Index: iw-5.16/iw.c
+===================================================================
+--- iw-5.16.orig/iw.c
++++ iw-5.16/iw.c
+@@ -45,7 +45,7 @@ static inline int nl_socket_set_buffer_s
+ 
+ int iw_debug = 0;
+ 
+-static int nl80211_init(struct nl80211_state *state)
++int nl80211_init(struct nl80211_state *state)
+ {
+ 	int err;
+ 
+@@ -82,7 +82,7 @@ static int nl80211_init(struct nl80211_s
+ 	return err;
+ }
+ 
+-static void nl80211_cleanup(struct nl80211_state *state)
++void nl80211_cleanup(struct nl80211_state *state)
+ {
+ 	nl_socket_free(state->nl_sock);
+ }
+Index: iw-5.16/iw.h
+===================================================================
+--- iw-5.16.orig/iw.h
++++ iw-5.16/iw.h
+@@ -268,6 +268,8 @@ char *hex2bin(const char *hex, char *buf
+ int set_bitrates(struct nl_msg *msg, int argc, char **argv,
+ 		 enum nl80211_attrs attr);
+ 
++int nl80211_init(struct nl80211_state *state);
++void nl80211_cleanup(struct nl80211_state *state);
+ 
+ /* sections */
+ DECLARE_SECTION(ap);
+Index: iw-5.16/scan.c
+===================================================================
+--- iw-5.16.orig/scan.c
++++ iw-5.16/scan.c
+@@ -2595,7 +2595,26 @@ static int handle_scan_combined(struct n
+ 		NL80211_CMD_SCAN_ABORTED,
+ 	};
+ 	int trig_argc, dump_argc, err;
+-	int i;
++	int i, mcid;
++	struct nl80211_state nlstate;
++
++	err = nl80211_init(&nlstate);
++	if (err) {
++		return err;
++	}
++
++	/* Scan multicast group */
++	mcid = nl_get_multicast_id(nlstate.nl_sock, "nl80211", "scan");
++	if (mcid >= 0) {
++		err = nl_socket_add_membership(nlstate.nl_sock, mcid);
++		if (err) {
++			nl80211_cleanup(&nlstate);
++			return err;
++		}
++	} else {
++		nl80211_cleanup(&nlstate);
++		return mcid;
++	}
+ 
+ 	if (argc >= 3 && !strcmp(argv[2], "-u")) {
+ 		dump_argc = 4;
+@@ -2645,11 +2664,13 @@ static int handle_scan_combined(struct n
+ 	 * Alas, the kernel doesn't do that (yet).
+ 	 */
+ 
+-	if (listen_events(state, ARRAY_SIZE(cmds), cmds) ==
++	if (__do_listen_events(&nlstate, ARRAY_SIZE(cmds), cmds, 0, NULL, NULL) ==
+ 					NL80211_CMD_SCAN_ABORTED) {
++		nl80211_cleanup(&nlstate);
+ 		printf("scan aborted!\n");
+ 		return 0;
+ 	}
++	nl80211_cleanup(&nlstate);
+ 
+ 	dump_argv[0] = argv[0];
+ 	return handle_cmd(state, id, dump_argc, dump_argv);
