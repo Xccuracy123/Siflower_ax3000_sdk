@@ -1,0 +1,55 @@
+# This script checks if the mac address in factory is valid.
+# If not, generate a random one.
+# It's only intended to be used with siflower dev boards.
+# Production boards should have their mac set during PCBA test.
+
+. /lib/functions/system.sh
+. /lib/functions.sh
+
+sf_patch_random_mac() {
+	BIN_FILE=$1
+	awk "BEGIN{printf(\"%c%c%c%c%c%c\",0x10, 0x16, 0x88, and($RANDOM, 0xff), and($RANDOM, 0xff), and($RANDOM, 0xfc))}" | \
+		dd of=$BIN_FILE conv=notrunc
+}
+
+sf_check_mac_valid() {
+	mac=$1
+	[ -z "$mac" ] && return 1
+	[ $mac = "00:00:00:00:00:00" ] && return 1
+	[ $(printf "%x" $(( 0x${mac//:/} & 0x010000000000 ))) == "0" ]
+}
+
+sf_check_mac_mtd() {
+	part=$(find_mtd_part factory)
+	[ -z "$part" ] && return
+	mac=$(get_mac_binary "$part" 0)
+	sf_check_mac_valid $mac && return 0
+	echo "MAC $mac is invalid. Generating a new one..."
+	dd if=$part of=/tmp/factory.bin
+	sf_patch_random_mac /tmp/factory.bin
+	mtd write /tmp/factory.bin factory
+	rm /tmp/factory.bin
+}
+
+fix_mac_for_siflower_dev_boards() {
+	case $(board_name) in
+	siflower,sf21a6826-evb|\
+	siflower,sf21a6826-fpga|\
+	siflower,sf21a6826-pw231_demo|\
+	siflower,sf21a6826-6826sg|\
+	siflower,sf21a6826-6826sg_v4|\
+	siflower,sf21a6826-6826sg_v4-nand|\
+	siflower,sf21a6826-6826sgsrb|\
+	siflower,sf21a6826-6826sgsrb-nand|\
+	siflower,sf21a6826-6826sgsrb_v4|\
+	siflower,sf21a6826-6826sgsrb_v4-nand|\
+	siflower,sf21a6826-6826sg2_v4|\
+	siflower,sf21a6826-6826sg2_v4-nand|\
+	siflower,sf21a6826-pw231_demo-easymesh|\
+	siflower,sf21a6826-pw231_demo_switch)
+		sf_check_mac_mtd
+		;;
+	esac
+}
+
+boot_hook_add preinit_main fix_mac_for_siflower_dev_boards

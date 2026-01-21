@@ -1,0 +1,150 @@
+Index: netifd-2022-08-25-76d2d41b/scripts/netifd-wireless.sh
+===================================================================
+--- netifd-2022-08-25-76d2d41b.orig/scripts/netifd-wireless.sh
++++ netifd-2022-08-25-76d2d41b/scripts/netifd-wireless.sh
+@@ -12,6 +12,7 @@ CMD_WPAUP=5
+ CMD_PROCESS_ADDWPA=6
+ CMD_PROCESS_KILL_WPA=7
+ CMD_SET_WPARETRY=8
++CMD_SET_SETUP_PID_FILE=9
+ 
+ add_driver() {
+ 	return
+@@ -226,6 +227,12 @@ _wireless_set_retry_wpas() {
+        _wdev_notify
+ }
+ 
++_wireless_set_setup_pid_file() {
++	_wdev_notify_init $CMD_SET_SETUP_PID_FILE
++	json_add_string file $1
++	_wdev_notify
++}
++
+ _wdev_wrapper \
+ 	wireless_add_vif \
+ 	wireless_add_vlan \
+@@ -237,7 +244,8 @@ _wdev_wrapper \
+ 	wireless_set_up_wpas \
+         wireless_add_process_wpas \
+         wireless_process_kill_wpas \
+-        wireless_set_retry_wpas
++        wireless_set_retry_wpas\
++	wireless_set_setup_pid_file
+ 
+ wireless_vif_parse_encryption() {
+ 	json_get_vars encryption
+Index: netifd-2022-08-25-76d2d41b/wireless.c
+===================================================================
+--- netifd-2022-08-25-76d2d41b.orig/wireless.c
++++ netifd-2022-08-25-76d2d41b/wireless.c
+@@ -477,6 +477,18 @@ wireless_device_setup_cancel(struct wire
+ 
+ 	D(WIRELESS, "Cancel wireless device '%s' setup\n", wdev->name);
+ 	wdev->cancel = true;
++	if (wdev->setup_pid_file) {
++		FILE *f = fopen(wdev->setup_pid_file, "r");
++		int pid;
++
++		if (f) {
++			if (fscanf(f, "%d", &pid) == 1 && pid > 1) {
++				D(WIRELESS, "Terminate setup pid '%d'\n", pid);
++				kill(pid, SIGTERM);
++			}
++			fclose(f);
++		}
++	}
+ 	uloop_timeout_set(&wdev->timeout, 15 * 1000);
+ }
+ 
+@@ -1378,12 +1390,13 @@ wireless_device_create(struct wireless_d
+ {
+ 	struct wireless_device *wdev;
+ 	char *name_buf;
++	char *setup_pid_file;
+ 	struct blob_attr *tb[__WDEV_ATTR_MAX];
+ 	struct blob_attr *cur;
+ 
+ 	blobmsg_parse(wdev_policy, __WDEV_ATTR_MAX, tb, blob_data(data), blob_len(data));
+ 
+-	wdev = calloc_a(sizeof(*wdev), &name_buf, strlen(name) + 1);
++	wdev = calloc_a(sizeof(*wdev), &name_buf, strlen(name) + 1, &setup_pid_file, 32);
+ 
+ 	cur = tb[WDEV_ATTR_DISABLED];
+ 	wdev->disabled = cur && blobmsg_get_bool(cur);
+@@ -1406,7 +1419,7 @@ wireless_device_create(struct wireless_d
+ 	wdev->retry_setup_failed = false;
+ 	wdev->autostart = true;
+ 	wdev->wpa_autostart = true;
+-
++	wdev->setup_pid_file = setup_pid_file;
+ 	INIT_LIST_HEAD(&wdev->script_proc);
+ 	INIT_LIST_HEAD(&wdev->wpa_script_proc);
+ 
+@@ -1803,6 +1816,38 @@ wireless_device_set_retry(struct wireles
+ 	return 0;
+ }
+ 
++static int
++wireless_device_set_setup_pid_file(struct wireless_device *wdev, struct blob_attr *data, bool ap)
++{
++	static const struct blobmsg_policy setup_pid_file_policy = {
++		.name = "file", .type = BLOBMSG_TYPE_STRING
++	};
++	struct blob_attr *val;
++
++	blobmsg_parse(&setup_pid_file_policy, 1, &val, blobmsg_data(data), blobmsg_data_len(data));
++	if (!val)
++		return UBUS_STATUS_INVALID_ARGUMENT;
++
++	if (strlen(blobmsg_data(val)) + 1 > 32) {
++		netifd_log_message(L_NOTICE, "filename '%s' too long, length:%d\n",
++								blobmsg_data(val), (int)strlen(blobmsg_data(val)));
++		return UBUS_STATUS_INVALID_ARGUMENT;
++	}
++
++
++	if(ap) {
++		if(wdev->setup_pid_file && strcmp(wdev->setup_pid_file, blobmsg_data(val))) {
++			netifd_log_message(L_NOTICE, "Update wireless device '%s' set setup_pid_file %s to %s\n",
++							wdev->name, wdev->setup_pid_file, blobmsg_data(val));
++			memset(wdev->setup_pid_file, 0, strlen(wdev->setup_pid_file));
++			strcpy(wdev->setup_pid_file, blobmsg_data(val));
++		}
++	}
++
++	netifd_log_message(L_NOTICE, "Wireless device '%s' set setup_pid_file=%s\n", wdev->name, wdev->setup_pid_file);
++	return 0;
++}
++
+ enum {
+ 	NOTIFY_CMD_UP = 0,
+ 	NOTIFY_CMD_SET_DATA = 1,
+@@ -1813,6 +1858,7 @@ enum {
+ 	NOTIFY_CMD_PROCESS_ADDWPA = 6,
+ 	NOTIFY_CMD_PROCESS_KILL_WPA = 7,
+ 	NOTIFY_CMD_SET_WPARETRY = 8,
++	NOTIFY_CMD_SET_SETUP_PID_FILE=9
+ };
+ 
+ /* ubus callback network.wireless.notify */
+@@ -1905,6 +1951,8 @@ wireless_device_notify(struct wireless_d
+ 		return wireless_device_set_retry(wdev, cur, true);
+ 	case NOTIFY_CMD_SET_WPARETRY:
+ 		return wireless_device_set_retry(wdev, cur, false);
++	case NOTIFY_CMD_SET_SETUP_PID_FILE:
++		return wireless_device_set_setup_pid_file(wdev, cur, true);
+ 	default:
+ 		return UBUS_STATUS_INVALID_ARGUMENT;
+ 	}
+Index: netifd-2022-08-25-76d2d41b/wireless.h
+===================================================================
+--- netifd-2022-08-25-76d2d41b.orig/wireless.h
++++ netifd-2022-08-25-76d2d41b/wireless.h
+@@ -96,6 +96,7 @@ struct wireless_device {
+ 	int vif_idx;
+ 	int vlan_idx;
+ 	int sta_idx;
++	char *setup_pid_file;
+ };
+ 
+ struct wireless_interface {

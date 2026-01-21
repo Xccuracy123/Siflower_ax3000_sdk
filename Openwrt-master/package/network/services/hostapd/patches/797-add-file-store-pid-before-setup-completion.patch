@@ -1,0 +1,73 @@
+Index: hostapd-2022-01-16-cff80b4f/hostapd/main.c
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/hostapd/main.c
++++ hostapd-2022-01-16-cff80b4f/hostapd/main.c
+@@ -41,6 +41,8 @@ struct hapd_global {
+ static struct hapd_global global;
+ static int daemonize = 0;
+ static char *pid_file = NULL;
++static char *setup_pid_file = NULL;
++
+ 
+ 
+ #ifndef CONFIG_NO_HOSTAPD_LOGGER
+@@ -645,6 +647,42 @@ static void hostapd_periodic(void *eloop
+ 	hostapd_for_each_interface(interfaces, hostapd_periodic_call, NULL);
+ }
+ 
++static void create_setup_pid_file(char *pid_file)
++{
++	const char *prefix = "setup-";
++	char *filename = NULL;
++	size_t dir_len;
++
++	if (setup_pid_file)
++		os_free(setup_pid_file);
++
++	if (pid_file) {
++		setup_pid_file = os_malloc(strlen(prefix) + strlen(pid_file) + 1);
++		if (setup_pid_file) {
++			filename = strrchr(pid_file, '/');
++			if (filename) {
++				filename++;
++				dir_len = filename - pid_file;
++				memcpy(setup_pid_file, pid_file, dir_len);
++				memcpy(setup_pid_file + dir_len, prefix, strlen(prefix));
++				strcpy(setup_pid_file + dir_len + strlen(prefix), filename);
++			}
++		}
++	}
++}
++
++int write_pid_to_file(const char *filename)
++{
++	FILE *f = fopen(filename, "w");
++	if (!f) {
++		perror("fopen");
++		return -1;
++	}
++
++	fprintf(f, "%d\n", getpid());
++	fclose(f);
++	return 0;
++}
+ 
+ int main(int argc, char *argv[])
+ {
+@@ -729,6 +767,8 @@ int main(int argc, char *argv[])
+ 		case 'P':
+ 			os_free(pid_file);
+ 			pid_file = os_rel2abs_path(optarg);
++			create_setup_pid_file(pid_file);
++			write_pid_to_file(setup_pid_file);
+ 			break;
+ 		case 't':
+ 			wpa_debug_timestamp++;
+@@ -942,6 +982,7 @@ int main(int argc, char *argv[])
+ 		eloop_cancel_timeout(hostapd_periodic, &interfaces, NULL);
+ 	hostapd_global_deinit(pid_file, interfaces.eloop_initialized);
+ 	os_free(pid_file);
++	os_free(setup_pid_file);
+ 
+ 	wpa_debug_close_syslog();
+ 	if (log_file)

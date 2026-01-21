@@ -1,0 +1,126 @@
+Index: hostapd-2022-01-16-cff80b4f/src/ap/drv_callbacks.c
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/src/ap/drv_callbacks.c
++++ hostapd-2022-01-16-cff80b4f/src/ap/drv_callbacks.c
+@@ -884,6 +884,24 @@ void hostapd_event_ch_switch(struct host
+ 		       hapd->iconf->ch_switch_he_config, offset,
+ 		       width, channel_width_to_string(width), cf1, cf2);
+ 
++	/* Disable radar detection */
++	hostapd_set_country_radar_state(hapd, true);
++	/* Need update channel region if don't use pre-cac */
++	hostapd_get_hw_features(hapd->iface);
++	hapd->iface->current_mode = NULL;
++	for (i = 0; i < hapd->iface->num_hw_features; i++) {
++		struct hostapd_hw_modes *mode = &hapd->iface->hw_features[i];
++
++		if (mode->mode == hapd->iface->conf->hw_mode) {
++			if (hapd->iface->freq > 0 &&
++			    !hw_mode_get_channel(mode, hapd->iface->freq, &channel))
++				continue;
++
++			hapd->iface->current_mode = mode;
++			break;
++		}
++	}
++
+ 	if (!hapd->iface->current_mode) {
+ 		hostapd_logger(hapd, NULL, HOSTAPD_MODULE_IEEE80211,
+ 			       HOSTAPD_LEVEL_WARNING,
+Index: hostapd-2022-01-16-cff80b4f/src/ap/hostapd.c
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/src/ap/hostapd.c
++++ hostapd-2022-01-16-cff80b4f/src/ap/hostapd.c
+@@ -66,7 +66,7 @@ static int setup_interface2(struct hosta
+ static void channel_list_update_timeout(void *eloop_ctx, void *timeout_ctx);
+ static void hostapd_interface_setup_failure_handler(void *eloop_ctx,
+ 						    void *timeout_ctx);
+-
++static bool is_5g_channel(u8 channel, struct hostapd_iface *iface);
+ 
+ int hostapd_for_each_interface(struct hapd_interfaces *interfaces,
+ 			       int (*cb)(struct hostapd_iface *iface,
+@@ -1771,11 +1771,13 @@ static int setup_interface(struct hostap
+ 			previous_country[0] = '\0';
+ 
+ 		os_memcpy(country, hapd->iconf->country, 3);
+-	 if (hapd->iconf->rd_disabled)
+-	     country[3] = 'T';
+-	 else
+-	     country[3] = 'F';
+-	 country[4] = '\0';
++		if (!is_5g_channel(hapd->iconf->channel, hapd->iface))
++			country[3] = 'N';
++		else if (hapd->iconf->rd_disabled)
++			country[3] = 'T';
++		else
++			country[3] = 'F';
++		country[4] = '\0';
+ 		if (hostapd_set_country(hapd, country) < 0) {
+ 			wpa_printf(MSG_ERROR, "Failed to set country code");
+ 			return -1;
+@@ -3954,3 +3956,36 @@ void hostapd_ocv_check_csa_sa_query(void
+ 	}
+ }
+ #endif /* CONFIG_OCV */
++
++void hostapd_set_country_radar_state(struct hostapd_data *bss, bool disable_dfs)
++{
++	if (!is_5g_channel(bss->iface->conf->channel, bss->iface))
++		return;
++	if (bss->iconf->country[0] && bss->iconf->country[1]) {
++		char country[5], previous_country[4];
++
++		if (hostapd_get_country(bss, previous_country) < 0)
++			previous_country[0] = '\0';
++
++		os_memcpy(country, bss->iconf->country, 3);
++        if(disable_dfs)
++            country[3] = 'T';
++        else
++            country[3] = 'F';
++		country[4] = '\0';
++		if (hostapd_set_country(bss, country) < 0) {
++			wpa_printf(MSG_ERROR, "Failed to set country code");
++		}
++	}
++}
++
++static bool is_5g_channel(u8 channel, struct hostapd_iface *iface)
++{
++    if (iface && iface->conf &&
++        iface->conf->hw_mode == HOSTAPD_MODE_IEEE80211A)
++        return true;
++
++	if (channel < 36 || channel > 165)
++		return false;
++	return true;
++}
+\ No newline at end of file
+Index: hostapd-2022-01-16-cff80b4f/src/ap/hostapd.h
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/src/ap/hostapd.h
++++ hostapd-2022-01-16-cff80b4f/src/ap/hostapd.h
+@@ -735,3 +735,5 @@ void fst_hostapd_fill_iface_obj(struct h
+ #endif /* CONFIG_FST */
+ 
+ #endif /* HOSTAPD_H */
++
++void hostapd_set_country_radar_state(struct hostapd_data *bss, bool disable_dfs);
+\ No newline at end of file
+Index: hostapd-2022-01-16-cff80b4f/src/drivers/driver_nl80211.c
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/src/drivers/driver_nl80211.c
++++ hostapd-2022-01-16-cff80b4f/src/drivers/driver_nl80211.c
+@@ -1820,7 +1820,10 @@ static int wpa_driver_nl80211_set_countr
+ 		return -EINVAL;
+ 	}
+ 
+-	if ((drv->nlmode == NL80211_IFTYPE_STATION) &&
++	if ((alpha2_arg[3] == 'N') && nla_put_u32(msg, NL80211_ATTR_DFS_CAC_TIME, NL80211_IFTYPE_STATION)) {
++		nlmsg_free(msg);
++		return -EINVAL;
++	} else if ((drv->nlmode == NL80211_IFTYPE_STATION) &&
+ 	 nla_put_u32(msg, NL80211_ATTR_DFS_CAC_TIME, NL80211_IFTYPE_STATION)) {
+ 		nlmsg_free(msg);
+ 		return -EINVAL;

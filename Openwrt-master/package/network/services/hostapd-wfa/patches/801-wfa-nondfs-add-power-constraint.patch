@@ -1,0 +1,16 @@
+Index: hostapd-2022-01-16-cff80b4f/src/ap/beacon.c
+===================================================================
+--- hostapd-2022-01-16-cff80b4f.orig/src/ap/beacon.c
++++ hostapd-2022-01-16-cff80b4f/src/ap/beacon.c
+@@ -124,9 +124,11 @@ static u8 * hostapd_eid_pwr_constraint(s
+ 	u8 local_pwr_constraint = 0;
+ 	int dfs;
+ 
++    /* add power constraint in non-dfs channel
+ 	if (hapd->iface->current_mode == NULL ||
+ 	    hapd->iface->current_mode->mode != HOSTAPD_MODE_IEEE80211A)
+ 		return eid;
++    */
+ 
+ 	/* Let host drivers add this IE if DFS support is offloaded */
+ 	if (hapd->iface->drv_flags & WPA_DRIVER_FLAGS_DFS_OFFLOAD)

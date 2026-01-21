@@ -1,0 +1,1288 @@
+#!/bin/sh
+
+# ==================================================================== Functional realization ===========================================================================
+# Check the value of enable.
+check_enable() {
+    local enable=$(uci -q get easymesh.status.enable)
+    if [ "$enable" != "1" ]; then
+        echo "Easymesh is not enabled"
+        exit 1
+    fi
+}
+
+# Save backhaul information for wireless connection
+set_backhaul_info() {
+    # Check if the number of arguments is 2.
+    if [ "$#" -ne 2 ]; then
+        echo "Two parameters are required."
+        return 1
+    fi
+    local backhaul_ssid=$1
+    local backhaul_key=$2
+
+    # Set backhaul STA info.
+    uci set wireless.default_radio02.ssid=$backhaul_ssid
+    uci set wireless.default_radio02.key=$backhaul_key
+    uci set wireless.default_radio12.ssid=$backhaul_ssid
+    uci set wireless.default_radio12.key=$backhaul_key
+    uci commit wireless
+}
+
+# Update the current WiFi name and password based on wireless, and send a renew message to update the agent.
+update_wifi_config() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if it is a Controller, only Controller need to set wifi config.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    if [ "$mode" != "controller" ]; then
+        echo "Only controller need to set wifi config."
+        return
+    fi
+
+    # Update wifi config.
+    local fronthaul_ssid=$(uci -q get wireless.default_radio0.ssid)
+    local fronthaul_key=$(uci -q get wireless.default_radio0.key)
+    local fronthaul_encryption=$(uci -q get wireless.default_radio0.encryption)
+    easymesh_ioctl Controller renew $fronthaul_ssid $fronthaul_key $fronthaul_encryption
+}
+
+# Set the Fronthaul BSS's SSID、KEY and Encryption, three parameters are required:
+#   - Fronthaul BSS's SSID
+#   - Fronthaul BSS's KEY
+#   - Fronthaul BSS's Encryption
+set_wifi_config() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if it is a Controller, only Controller need to set wifi config.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    if [ "$mode" != "controller" ]; then
+        echo "Only controller need to set wifi config."
+        return
+    fi
+
+    # Check if the number of arguments is 3.
+    if [ "$#" -ne 3 ]; then
+        echo "Three parameters are required."
+        return 1
+    fi
+    local fronthaul_ssid=$1
+    local fronthaul_key=$2
+    local fronthaul_encryption=$3
+
+    # Set wifi config.
+    uci set wireless.default_radio0.ssid="$fronthaul_ssid"
+    uci set wireless.default_radio0.key="$fronthaul_key"
+    uci set wireless.default_radio0.encryption="$fronthaul_encryption"
+    uci set wireless.default_radio1.ssid="$fronthaul_ssid"
+    uci set wireless.default_radio1.key="$fronthaul_key"
+    uci set wireless.default_radio1.encryption="$fronthaul_encryption"
+    uci commit wireless
+}
+
+# Check if autoconfig completed.
+check_autoconfig_completed() {
+    # Check if netdevice for ioctl exists.
+    if [ -z "$(ifconfig -a | grep -o 'Agent')" ]; then
+        uci set easymesh.status.conn_status='false'
+        uci commit easymesh
+        return
+    fi
+
+    # Get connection status of HB & LB.
+    local hb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_hb | awk '/status:/ {print $2}')
+    local lb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_lb | awk '/status:/ {print $2}')
+    if [ "$hb_status" == "1" ] && [ "$lb_status" == "1" ]; then
+        uci set easymesh.status.conn_status='true'
+        uci commit easymesh
+    else
+        uci set easymesh.status.conn_status='false'
+        uci commit easymesh
+    fi
+}
+
+# Check can update wifi config.
+check_can_update_wifi_config() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if it is a Controller, only Controller need to get conn status.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    if [ "$mode" != "controller" ]; then
+        echo "Only Controller needs to be configured."
+        return 1
+    fi
+
+    # Check if can update wifi config.
+    check_autoconfig_completed
+    local conn_status=$(uci -q get easymesh.status.conn_status)
+    if [ "$conn_status" == "true" ]; then
+        uci set easymesh.status.can_update_wifi_config='true'
+        uci commit easymesh
+    else
+        uci set easymesh.status.can_update_wifi_config='false'
+        uci commit easymesh
+    fi
+}
+
+# Get connection status.
+get_conn_status() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if it is a Controller, it is no need to get conn status.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    if [ "$mode" == "controller" ]; then
+        echo "Controller is no need to get conn status."
+        return 1
+    fi
+
+    # Check if autoconfig completed.
+    check_autoconfig_completed
+}
+
+# Check if WPS can be enabled.
+check_wps_enable() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if netdevice for ioctl exists.
+    if [ -z "$(ifconfig -a | grep -o 'Agent')" ]; then
+        uci set easymesh.status.can_enable_wps='false'
+        uci commit easymesh
+        return
+    fi
+
+    # Get backhaul link form.
+    local backhaul_conn_type=$(uci -q get easymesh.status.backhaul_conn_type)
+    # Get connection status of HB & LB.
+    local hb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_hb | awk '/status:/ {print $2}')
+    local lb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_lb | awk '/status:/ {print $2}')
+    # Check if backhaul connection type is wired and if both HB & LB connections are completed.
+    if [ "$backhaul_conn_type" == "wired" ] && { [ "$hb_status" != "1" ] || [ "$lb_status" != "1" ]; }; then
+        uci set easymesh.status.can_enable_wps='false'
+        uci commit easymesh
+        return
+    fi
+
+    # Check if Agent init completed.
+    local agent_init_completed=$(easymesh_ioctl Agent get_status agent_init_completed | awk '/status:/ {print $2}')
+    if [ "$agent_init_completed" != "1" ]; then
+        uci set easymesh.status.can_enable_wps='false'
+        uci commit easymesh
+        return
+    fi
+
+    # WPS can be enabled.
+    uci set easymesh.status.can_enable_wps='true'
+    uci commit easymesh
+}
+
+# Press the WPS button.
+enable_wps() {
+    # Check if WPS can be enabled.
+    check_wps_enable
+    local can_enable=$(uci -q get easymesh.status.can_enable_wps)
+    if [ "$can_enable" != "true" ]; then
+        echo "WPS can't be enabled."
+        return 1
+    fi
+
+    # Perform different operations based on the mode.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    case "$mode" in
+        agent)
+            # Get connection status of HB & LB.
+            local hb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_hb | awk '/status:/ {print $2}')
+            local lb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_lb | awk '/status:/ {print $2}')
+            # Get backhaul link form.
+            local backhaul_conn_type=$(uci -q get easymesh.status.backhaul_conn_type)
+            # Determine whose WPS is enabled based on the form and whether it is fully connected.
+            case $backhaul_conn_type in
+                wired)
+                    ubus call hostapd.wlan0 wps_start
+                    ubus call hostapd.wlan1 wps_start
+                    echo "Enable WPS PUSH BUTTON on wlan0/wlan1."
+                    ;;
+                wireless-24)
+                    if [ "$hb_status" == "1" ] && [ "$lb_status" == "1" ]; then
+                        ubus call hostapd.wlan0 wps_start
+                        ubus call hostapd.wlan1 wps_start
+                        echo "Enable WPS PUSH BUTTON on wlan0/wlan1."
+                    else
+                        ubus call wpa_supplicant.wlan1-2 wps_start '{"multi_ap":true}'
+                        echo "Enable WPS PUSH BUTTON on wlan1-2."
+                    fi
+                    ;;
+                wireless-5)
+                    if [ "$hb_status" == "1" ] && [ "$lb_status" == "1" ]; then
+                        ubus call hostapd.wlan0 wps_start
+                        ubus call hostapd.wlan1 wps_start
+                        echo "Enable WPS PUSH BUTTON on wlan0/wlan1."
+                    else
+                        ubus call wpa_supplicant.wlan0-2 wps_start '{"multi_ap":true}'
+                        echo "Enable WPS PUSH BUTTON on wlan0-2."
+                    fi
+                    ;;
+                *)
+                    echo "Invalid backhaul link form: $form."
+                    ;;
+            esac
+            ;;
+        controller)
+            ubus call hostapd.wlan0 wps_start
+            ubus call hostapd.wlan1 wps_start
+            echo "Enable WPS PUSH BUTTON on wlan0/wlan1."
+            ;;
+        *)
+            echo "Invalid mode: $mode"
+            exit 1
+        ;;
+    esac
+}
+
+# Check can be enable connection.
+check_conn_enable() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check can be enable connection.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    case "$mode" in
+        agent)
+            # Check if netdevice for ioctl exists.
+            if [ -z "$(ifconfig -a | grep -o 'Agent')" ]; then
+                uci set easymesh.status.can_enable_conn='false'
+                uci commit easymesh
+                return
+            fi
+            # Check if Agent init completed.
+            local agent_init_completed=$(easymesh_ioctl Agent get_status agent_init_completed | awk '/status:/ {print $2}')
+            if [ "$agent_init_completed" == "1" ]; then
+                uci set easymesh.status.can_enable_conn='true'
+                uci commit easymesh
+            else
+                uci set easymesh.status.can_enable_conn='false'
+                uci commit easymesh
+            fi
+            ;;
+        controller)
+            # Check if autoconfig completed.
+            check_autoconfig_completed
+            local conn_status=$(uci -q get easymesh.status.conn_status)
+            if [ "$conn_status" == "true" ]; then
+                uci set easymesh.status.can_enable_conn='true'
+                uci commit easymesh
+            else
+                uci set easymesh.status.can_enable_conn='false'
+                uci commit easymesh
+            fi
+            ;;
+        *)
+            echo "Invalid mode: $mode"
+            exit 1
+        ;;
+    esac
+}
+
+# Disconnect the Agent from the Hostapd and Wpa_supplicant.
+unbind_netlink() {
+    # Check if netdevice for ioctl exists.
+    if [ -n "$(ifconfig -a | grep -o 'Agent')" ]; then
+        # If the node exists, perform the unbind operation.
+        easymesh_ioctl Agent bind unbind
+    fi
+}
+
+# Unlaod drivers based on the current mode.
+unload_module() {
+    # Perform different operations based on the mode.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    case "$mode" in
+        agent)
+            MODULES_UNLOAD="agent.ko 1905_transport.ko"
+            ;;
+        controller)
+            MODULES_UNLOAD="agent.ko controller.ko 1905_transport.ko"
+            ;;
+        *)
+            echo "Invalid mode: $mode"
+            exit 1
+        ;;
+    esac
+
+    # Disconnect the Agent from the upper layer application.
+    unbind_netlink
+
+    # Unlaod module.
+    for module in $MODULES_UNLOAD; do
+        local module_name=$(echo "$module" | sed 's/\.ko$//')
+        if lsmod | grep -qw "$module_name"; then
+            rmmod "$module_name"
+            if [ $? -ne 0 ]; then
+                echo "rmmod $module_name failed"
+            fi
+        fi
+    done
+}
+
+# Restore default configuration.
+restore_default_config() {
+    # Unload easymesh driver.
+    unload_module
+    sleep 2
+
+    # Restore default configuration.
+    # easymesh.
+    uci set easymesh.status.enable='0'
+    uci set easymesh.status.management_mode='controller'
+    uci set easymesh.status.backhaul_conn_type='wired'
+    uci set easymesh.status.conn_status='false'
+    uci set easymesh.status.is_first_load='false'
+    uci set easymesh.status.is_set_mode='false'
+    uci set easymesh.status.can_enable_wps='false'
+    uci set easymesh.status.can_enable_conn='false'
+    uci set easymesh.status.can_update_wifi_config='false'
+    uci set easymesh.status.wan='none'
+    uci commit easymesh
+
+    # wireless.
+    cp /etc/config/wireless_old /etc/config/wireless
+    rm -rf /etc/config/wireless_old
+
+    # dhcp.
+    uci -q delete dhcp.lan.ignore
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart &
+
+    # network.
+    cp /etc/config/network_old /etc/config/network
+    rm -rf /etc/config/network_old
+    /etc/init.d/network restart &
+}
+
+# The agent needs to automatically initiate a network connection.
+# If the connection fails after timeout [120 seconds], the default configuration needs to be restored.
+auto_connection() {
+    # Start time & end time.
+    local start_time=$(date +%s)
+    local end_time=$((start_time + 120))
+
+    # Get backhaul link form.
+    local backhaul_conn_type=$(uci -q get easymesh.status.backhaul_conn_type)
+    if [ "$backhaul_conn_type" == "wired" ]; then
+        # Loop check if the node exists.
+        while true; do
+            # Check if the current time exceeds the end time.
+            current_time=$(date +%s)
+            if [ $current_time -ge $end_time ]; then
+                echo "The connection timed out and could not be completed within the specified time."
+                restore_default_config
+                return 1
+            fi
+
+            # Check if netdevice for ioctl exists.
+            if [ -n "$(ifconfig -a | grep -o 'Agent')" ]; then
+                break;
+            fi
+
+            # Wait for 2 seconds before retesting.
+            sleep 2
+        done
+    else
+        # Loop check if can enable wps and enable wps.
+        while true; do
+            # Check if the current time exceeds the end time.
+            current_time=$(date +%s)
+            if [ $current_time -ge $end_time ]; then
+                echo "The connection timed out and could not be completed within the specified time."
+                restore_default_config
+                return 1
+            fi
+
+            # Check if WPS can be enabled.
+            check_wps_enable
+            local can_enable=$(uci -q get easymesh.status.can_enable_wps)
+            if [ "$can_enable" == "true" ]; then
+                if [ "$backhaul_conn_type" == "wireless-5" ]; then
+                    ubus call wpa_supplicant.wlan0-2 wps_start '{"multi_ap":true}'
+                    echo "Enable WPS PUSH BUTTON on wlan0-2."
+                else
+                    ubus call wpa_supplicant.wlan1-2 wps_start '{"multi_ap":true}'
+                    echo "Enable WPS PUSH BUTTON on wlan1-2."
+                fi
+                break
+            fi
+
+            # Wait for 2 seconds before retesting.
+            sleep 2
+        done
+    fi
+
+    # Loop check if the connection is complete.
+    while true; do
+        # Check if the current time exceeds the end time.
+        current_time=$(date +%s)
+        if [ $current_time -ge $end_time ]; then
+            echo "The connection timed out and could not be completed within the specified time."
+            restore_default_config
+            return 1
+        fi
+
+        # Get connection status of HB & LB.
+        local hb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_hb | awk '/status:/ {print $2}')
+        local lb_status=$(easymesh_ioctl Agent get_status autoconfig_completed_lb | awk '/status:/ {print $2}')
+        # Check if both HB & LB connections are completed.
+        if [ "$hb_status" == "1" ] && [ "$lb_status" == "1" ]; then
+            echo  "Complete the connection within the specified time."
+            break
+        fi
+
+        # Wait for 2 seconds before retesting.
+        sleep 2
+    done
+}
+
+# Reload WiFi and return upon successful loading.
+reload_wifi() {
+    local target_message="wlan0-1: link becomes ready"
+    local is_first_load=$(uci -q get easymesh.status.is_first_load)
+    local mode=$(uci -q get easymesh.status.management_mode)
+
+    # Clear dmesg buffer
+    dmesg -c > /dev/NULL
+
+    # If it is the first load, some actions need to be taken.
+    if [ "$is_first_load" == "true" ]; then
+        uci set easymesh.status.is_first_load='false'
+        uci commit easymesh
+        if [ "$mode" == "agent" ]; then
+            # Reload network and dnsmasq.
+            /etc/init.d/dnsmasq restart &
+            /etc/init.d/network restart &
+            sleep 20
+        else
+            # Relaod wifi.
+            wifi &
+        fi
+    else
+        # Reload wifi.
+        wifi &
+    fi
+
+    # Wait for WiFi to be ready with a timeout of 240 seconds.
+    local timeout=240
+    local elapsed_count=0
+    while ! dmesg | grep -q "$target_message"; do
+        # Determine if timeout has occurred.
+        elapsed_count=$((elapsed_count + 1))
+        if [ "$elapsed_count" -ge "$timeout" ]; then
+            echo "WiFi did not become ready within $timeout seconds."
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# Laod drivers based on the current mode.
+# There are multiple situations:
+#	load_module: Called when manually loading through serial ports.
+#	load_module web: Called when loading through web pages.
+#	load_module auto_load : Called when the board restarts and automatically loads.
+#	load_module wireless_to_wired : Called when converting wireless connection to wired connection.
+#	load_module wired_to_wireless : Called when converting wired connection to wireless connection.
+load_module() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if there is a management mode set.
+    local is_set_mode=$(uci -q get easymesh.status.is_set_mode)
+    if [ "$is_set_mode" != "true" ]; then
+        echo "Need to set a management mode before load the driver"
+        return 1
+    fi
+
+    # Get the ko to be loaded.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    case "$mode" in
+        agent)
+            MODULES_LOAD="1905_transport.ko agent.ko"
+            ;;
+        controller)
+            MODULES_LOAD="1905_transport.ko controller.ko agent.ko "
+            ;;
+        *)
+            echo "Invalid mode: $mode"
+            exit 1
+        ;;
+    esac
+
+    # If it is not automatically loaded, you need to reload and wait for WiFi to start.
+    # If it is automatically loaded, you only need to wait for WiFi to start.
+    if [ $# -eq 1 ] && [ "$1" == "auto_load" ]; then
+        local target_message="wlan0-1: link becomes ready"
+        # Wait for WiFi to be ready with a timeout of 240 seconds.
+        local timeout=240
+        local elapsed_count=0
+
+        while ! dmesg | grep -q "$target_message"; do
+            # Determine if timeout has occurred.
+            elapsed_count=$((elapsed_count + 1))
+            if [ "$elapsed_count" -ge "$timeout" ]; then
+                echo "WiFi did not become ready within $timeout seconds."
+                return 1
+            fi
+            sleep 1
+        done
+    else
+        if [ $# -ne 1 ] || [ "$1" != "wireless_to_wired" ]; then
+            # Reload WiFi and Wait for WiFi to be ready.
+            reload_wifi
+        fi
+    fi
+
+    # Load driver.
+    for module in $MODULES_LOAD; do
+        local module_name=$(echo "$module" | sed 's/\.ko$//')
+        if ! lsmod | grep -qw "$module_name"; then
+            insmod "$module_name"
+            if [ $? -ne 0 ]; then
+                echo "insmod $module_name failed"
+                return 1
+            fi
+        fi
+    done
+
+    # When the parameter is 'web' and the mode is 'agent', an automatic connection should be initiated.
+    # If the connection fails after timeout [120 seconds], the default configuration needs to be restored.
+    if [ $# -eq 1 ] && [ "$mode" == "agent" ] && [ "$1" == "web" ]; then
+       auto_connection
+    fi
+}
+
+# Set the form of backhaul connections, one parameters are required:
+#   - wired: wired backhaul link
+#   - wireless-24: wireless backhaul link in 2.4G
+#   - wirelsss-5: wireless backhaul link in 5G
+set_backhaul_form() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if mode is Agent.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    if [  "$mode" != "agent" ]; then
+        echo "Only Agent can be set backhaul link from."
+        return 1
+    fi
+
+    # Check if the number of arguments is 1.
+    if [ "$#" -ne 1 ]; then
+        echo "One parameters are required."
+        return 1
+    fi
+
+    # Set form.
+    local form=$1
+    case $form in
+        wired)
+            uci set wireless.default_radio02.disabled='1'
+            uci set wireless.default_radio12.disabled='1'
+            uci commit wireless
+            uci set easymesh.status.backhaul_conn_type='wired'
+            uci commit easymesh
+            ;;
+        wireless-24)
+            uci set wireless.default_radio02.disabled='1'
+            uci set wireless.default_radio12.disabled='0'
+            uci commit wireless
+            uci set easymesh.status.backhaul_conn_type='wireless-24'
+            uci commit easymesh
+            ;;
+        wireless-5)
+            uci set wireless.default_radio02.disabled='0'
+            uci set wireless.default_radio12.disabled='1'
+            uci commit wireless
+            uci set easymesh.status.backhaul_conn_type='wireless-5'
+            uci commit easymesh
+            ;;
+        *)
+            echo "Invalid form: $form"
+            ;;
+    esac
+}
+
+# Wireless connection to wired connection.
+wireless_to_wired() {
+    # Get backhaul form and check if we need to change.
+    local form=$(uci -q get easymesh.status.backhaul_conn_type)
+    if [ "$form" = "wired" ]; then
+        echo "No need to change wireless to wired."
+        return 1
+    fi
+
+    # Set backhaul form.
+    set_backhaul_form wired
+
+    # Uninstall the driver first, then reload after 2 seconds.
+    unload_module
+    sleep 2
+    ./etc/init.d/network restart
+    sleep 15
+    load_module wireless_to_wired
+}
+
+# Wired connection to wireless connection, default to hign band, two parameters are required:
+#  - Backhaul BSS's SSID
+#  - Backhaul BSS's KEY
+wired_to_wireless() {
+    # Get backhaul form and check if we need to change.
+    local form=$(uci -q get easymesh.status.backhaul_conn_type)
+    if [ "$form" = "wireless" ]; then
+        echo "No need to change wired to wireless."
+        return 1
+    fi
+
+    # Set backhaul form.
+    set_backhaul_form wireless-5
+
+    # Uninstall the driver first, then reload after 2 seconds.
+    unload_module
+    sleep 2
+    load_module wired_to_wireless
+}
+
+# Set controller configuration, five parameters are required:
+#   - Fronthaul BSS's SSID
+#   - Fronthaul BSS's KEY
+#   - Fronthaul BSS's Encryption
+#   - Backhaul BSS's SSID
+#   - Backhaul BSS's KEY
+set_controller_config() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if mode is Controller.
+    local mode=$(uci -q get easymesh.status.management_mode)
+    if [  "$mode" != "controller" ]; then
+        echo "Only Controller can be configured."
+        return 1
+    fi
+
+    # Check if config can be set.
+    local is_first_load=$(uci -q get easymesh.status.is_first_load)
+    if [ "$is_first_load" == "false" ]; then
+        echo "You can set the config only before the first loading."
+        return 1
+    fi
+
+    # Check if the number of arguments is 5.
+    if [ "$#" -ne 5 ]; then
+        echo "Five parameters are required."
+        return 1
+    fi
+
+    # Set config.
+    local fronthaul_ssid=$1
+    local fronthaul_key=$2
+    local fronthaul_encryption=$3
+    local backhaul_ssid=$4
+    local backhaul_key=$5
+    # High band.
+    uci set wireless.default_radio0.ssid="$fronthaul_ssid"
+    uci set wireless.default_radio0.key="$fronthaul_key"
+    uci set wireless.default_radio0.encryption="$fronthaul_encryption"
+    uci set wireless.default_radio0.multi_ap_backhaul_ssid="$backhaul_ssid"
+    uci set wireless.default_radio0.multi_ap_backhaul_key="$backhaul_key"
+    uci set wireless.default_radio01.ssid="$backhaul_ssid"
+    uci set wireless.default_radio01.key="$backhaul_key"
+    # Low band.
+    uci set wireless.default_radio1.ssid="$fronthaul_ssid"
+    uci set wireless.default_radio1.key="$fronthaul_key"
+    uci set wireless.default_radio1.encryption="$fronthaul_encryption"
+    uci set wireless.default_radio1.multi_ap_backhaul_ssid="$backhaul_ssid"
+    uci set wireless.default_radio1.multi_ap_backhaul_key="$backhaul_key"
+    uci set wireless.default_radio11.ssid="$backhaul_ssid"
+    uci set wireless.default_radio11.key="$backhaul_key"
+    uci commit wireless
+}
+
+# Generate default SSID based on the MAC address of br-lan.
+generate_default_ssid() {
+    # Get br-lan MAC.
+    local br_lan_mac=$(ifconfig br-lan | awk '/HWaddr/ {print $NF}')
+    # Obtain the last two value using _ splicing.
+    local last_two_values=$(echo "$br_lan_mac" | awk -F ':' '{print $(NF-1) "_" $NF}')
+    # Splice into default SSID.
+    local fronthaul_ssid="SiWiFi_EM_${last_two_values}"
+    local backhaul_ssid="SiWiFi_EM_${last_two_values}_BH"
+    # Set default SSID.
+    uci set wireless.default_radio0.ssid="$fronthaul_ssid"
+    uci set wireless.default_radio0.multi_ap_backhaul_ssid="$backhaul_ssid"
+    uci set wireless.default_radio01.ssid="$backhaul_ssid"
+    uci set wireless.default_radio1.ssid="$fronthaul_ssid"
+    uci set wireless.default_radio1.multi_ap_backhaul_ssid="$backhaul_ssid"
+    uci set wireless.default_radio11.ssid="$backhaul_ssid"
+    uci commit wireless
+}
+
+# Set the management mode of EasyMesh, one parameters are required:
+#	- controller
+#	- agent
+set_management_mode() {
+    # Check if EasyMesh is enable.
+    check_enable
+
+    # Check if the number of arguments is 1.
+    if [ "$#" -ne 1 ]; then
+        echo "One parameters are required."
+        return 1
+    fi
+    local mode="$1"
+
+    # Check if management mode can be set.
+    local is_first_load=$(uci -q get easymesh.status.is_first_load)
+    if [ "$is_first_load" == "false" ]; then
+        echo "You can set the management mode only before the first loading."
+        return 1
+    fi
+
+    # Perform different operations for different modes.
+    local eth=$(uci -q get network.wan.device)
+    if [ -z "$eth" ]; then
+        eth=$(uci -q get network.wan4.device)
+    fi
+    if [ "$mode" == "controller" ]; then
+        # Set management mode.
+        uci set easymesh.status.management_mode="$mode"
+        uci set easymesh.status.is_set_mode='true'
+        uci set easymesh.status.wan=$eth
+        uci commit easymesh
+
+        # Generate default SSID.
+        generate_default_ssid
+    elif [ "$mode" == "agent" ]; then
+        # Set management mode.
+        uci set easymesh.status.management_mode="$mode"
+        uci set easymesh.status.is_set_mode='true'
+        uci set easymesh.status.wan=$eth
+        uci commit easymesh
+
+        # Generate default SSID.
+        generate_default_ssid
+
+        # Modify dhcp configuration.
+        # Enable lan's DHCP.
+        uci set dhcp.lan.ignore='1'
+        uci commit dhcp
+
+        # Modify network configuration.
+        # Save old network configuration.
+        cp /etc/config/network  /etc/config/network_old
+        # Enable DHCP.
+        uci -q delete network.lan.ipaddr
+        uci -q delete network.lan.netmask
+        uci -q delete network.lan.ip6assign
+        uci set network.lan.proto='dhcp'
+        # Add wan to lan.
+        uci set network.wan.disabled='1'
+        uci add_list network.@device[1].ports=$eth
+        uci set network.wan6.disabled='1'
+        uci commit network
+        # Set wan name.
+        uci set easymesh.status.wan=$eth
+        uci commit easymesh
+    else
+        echo "Invalid management mode: $mode"
+        return 1
+    fi
+}
+
+# Enable EasyMesh.
+easymesh_enable() {
+    # Enable.
+    uci set easymesh.status.enable='1'
+    uci set easymesh.status.is_first_load='true'
+    uci commit easymesh
+
+    # Save old configuration and use new configuration.
+    cp /etc/config/wireless  /etc/config/wireless_old
+    cp /opt/easymesh/wireless /etc/config/wireless
+}
+
+# Disable EasyMesh.
+easymesh_disable() {
+    # Get current mdoe.
+    local mode=$(uci -q get easymesh.status.management_mode)
+
+    # Disable and restore default configuration.
+    uci set easymesh.status.enable='0'
+    uci set easymesh.status.management_mode='controller'
+    uci set easymesh.status.backhaul_conn_type='wired'
+    uci set easymesh.status.conn_status='false'
+    uci set easymesh.status.is_first_load='false'
+    uci set easymesh.status.is_set_mode='false'
+    uci set easymesh.status.can_enable_wps='false'
+    uci set easymesh.status.can_enable_conn='false'
+    uci set easymesh.status.can_update_wifi_config='false'
+    uci set easymesh.status.wan='none'
+    uci commit easymesh
+
+    # If configured before, restore the old configuration.
+    if [ -f /etc/config/wireless_old ]; then
+        mv /etc/config/wireless_old /etc/config/wireless
+    fi
+
+    # Unload easymesh driver.
+    unload_module
+    sleep 2
+
+    # Perform different processing according to the mode.
+    if [ "$mode" == "agent" ]; then
+        # Restore the original configuration.
+        uci -q delete dhcp.lan.ignore
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart &
+        cp /etc/config/network_old /etc/config/network
+        rm -rf /etc/config/network_old
+        /etc/init.d/network restart &
+    else
+        # Reload.
+        wifi &
+    fi
+}
+
+# Change controller to agent.
+controller_to_agent() {
+    # Disable easymesh.
+    easymesh_disable
+
+    sleep 20
+
+    # Enable easymesh.
+    easymesh_enable
+
+    # Set mode to agent.
+    set_management_mode agent
+
+    # Set backhaul form to wired.
+    set_backhaul_form wired
+
+    # Load module.
+    load_module
+}
+
+get_topology() {
+    easymesh_ioctl Controller get_topo > /tmp/topology
+    file=/tmp/topology
+
+    # 总行数，会忽略空行
+    line_num=0
+    # 带有name字符的行会被认为是一个节点node
+    node_num=0
+
+    while read line; do
+        # 跳过空行
+        if [ "${line}" = "" ]; then
+            continue
+        fi
+        is_node=$(echo $line | grep name)
+        # 判断是否为节点
+        if [ "${is_node}" != "" ]; then
+            # 记录上一个节点的结束
+            eval "node_${node_num}_end=${line_num}"
+            # 计算上一个节点的行数
+            eval tmp_a=\$node_${node_num}_end
+            eval tmp_b=\$node_${node_num}_start
+            tmp_ab=$((tmp_a - tmp_b + 1))
+            eval "node_${node_num}_num=$tmp_ab"
+            # 节点数加1
+            node_num=$(($node_num + 1))
+            # 新节点的起始位置，截取prev_mac后的mac地址，状态
+            eval "node_${node_num}_start=$((line_num + 1))"
+            eval "node_${node_num}_mac=\${line#*prev_mac:}"
+            eval "node_${node_num}_status=0"
+        fi
+        # 行数加1
+        line_num=$(($line_num + 1))
+        # line_*赋值
+        eval "line_${line_num}=\${line}"
+    done < $file
+
+    # 给最后一个节点赋值结束位置和行数
+    eval "node_${node_num}_end=${line_num}"
+    eval tmp_a=\$node_${node_num}_end
+    eval tmp_b=\$node_${node_num}_start
+    tmp_ab=$((tmp_a - tmp_b + 1))
+    eval "node_${node_num}_num=$tmp_ab"
+
+    # 需要处理的节点个数
+    todo_node_num=$node_num
+    # 即将作为输出的行数
+    output_line_num=0
+    # 临时计数
+    tmp_num=0
+
+    # 第一个节点作为主节点，直接赋值
+    output_read_line=$node_1_start
+    while [ "$tmp_num" -lt "$node_1_num" ]; do
+        tmp_num=$((tmp_num + 1))
+        output_line_num=$((output_line_num + 1))
+        eval output_line_$output_line_num=\$line_$output_read_line
+        # 节点第一行与第二行差一个优先级
+        if [ $tmp_num = 1 ]; then
+            eval output_line_${output_line_num}_level=0
+        else
+            eval output_line_${output_line_num}_level=1
+
+            # 检查line中是否包含BSS/client/neighbor，如果包含，优先级+1/+2/+2
+            line=$(eval echo \${line_$output_read_line})
+            is_client=$(echo $line | grep CLIENT)
+            is_neighbor=$(echo $line | grep NEIGHBOR)
+            is_bss=$(echo $line | grep BSS)
+            # 判断是否为BSS
+            if [ "${is_bss}" != "" ]; then
+                eval output_line_${output_line_num}_level=$((output_line_${output_line_num}_level + 1))
+            fi
+            # 判断是否为Client
+            if [ "${is_client}" != "" ]; then
+                eval output_line_${output_line_num}_level=$((output_line_${output_line_num}_level + 2))
+            fi
+            # 判断是否为Neighbor
+            if [ "${is_neighbor}" != "" ]; then
+                eval output_line_${output_line_num}_level=$((output_line_${output_line_num}_level + 1))
+            fi
+        fi
+        output_read_line=$((output_read_line + 1))
+    done
+    todo_node_num=$((todo_node_num - 1))
+    node_1_status=1
+
+    # 继续从第二个节点开始处理
+    tmp_node_num=2
+    # 循环次数上限，防止死循环
+    loop_limit=$((todo_node_num + 5))
+    # 每次从tmp_node_num开始遍历，直到全部处理完成
+    while [ "$todo_node_num" -gt 0 ]; do
+        # 循环达到上限，节点过多时建议增加次数
+        loop_limit=$((loop_limit - 1))
+        if [ "$loop_limit" = 0 ]; then
+            break
+        fi
+
+        # 节点是否已经处理过
+        eval node_success="\$node_${tmp_node_num}_status"
+        # 未处理过
+        if [ "$node_success" != "1" ]; then
+            tmp_num=0
+            # 从头开始遍历输出内容
+            while [ "$tmp_num" -lt "$output_line_num" ]; do
+                tmp_num=$((tmp_num + 1))
+                eval line_context="\$output_line_$tmp_num"
+                eval search_context="\$node_${tmp_node_num}_mac"
+                # 查找mac地址
+                find_mac=$(echo $line_context | grep ${search_context})
+                find_radio=$(echo $line_context | grep radio)
+                if [ "$find_mac" != "" ] && [ "$find_radio" = "" ]; then
+                    eval add_node_num="\$node_${tmp_node_num}_num"
+                    # 先移出空位，以放置新节点
+                    move_num=$((output_line_num - tmp_num))
+
+                    while [ "$move_num" -gt 0 ]; do
+                        output_line_num_new=$((output_line_num + add_node_num + move_num - output_line_num + tmp_num))
+                        eval output_line_num_old=$((output_line_num + move_num - output_line_num + tmp_num))
+                        eval output_line_$output_line_num_new=\$output_line_$output_line_num_old
+                        eval output_line_${output_line_num_new}_level=\$output_line_${output_line_num_old}_level
+                        move_num=$((move_num - 1))
+                    done
+
+                    add_node_num_tmp=0
+                    eval add_node_start="\$node_${tmp_node_num}_start"
+                    # 放入节点内容
+                    while [ "$add_node_num_tmp" -lt "$add_node_num" ]; do
+                        output_line_num_new=$((tmp_num + 1 + add_node_num_tmp))
+                        line_num_old=$((add_node_start + add_node_num_tmp))
+                        eval output_line_$output_line_num_new=\$line_$line_num_old
+                        if [ "$add_node_num_tmp" = "0" ]; then
+                            eval output_line_${output_line_num_new}_level=$((output_line_${tmp_num}_level + 1))
+                        else
+                            eval output_line_${output_line_num_new}_level=$((output_line_${tmp_num}_level + 2))
+
+                             # 检查line中是否包含BSS/client/neighbor，如果包含，优先级+1/+2/+2
+                            line=$(eval echo \${line_$line_num_old})
+                            is_client=$(echo $line | grep CLIENT)
+                            is_neighbor=$(echo $line | grep NEIGHBOR)
+                            is_bss=$(echo $line | grep BSS)
+                            # 判断是否为BSS
+                            if [ "${is_bss}" != "" ]; then
+                                eval output_line_${output_line_num_new}_level=$((output_line_${output_line_num_new}_level + 1))
+                            fi
+                            # 判断是否为Client
+                            if [ "${is_client}" != "" ]; then
+                                eval output_line_${output_line_num_new}_level=$((output_line_${output_line_num_new}_level + 2))
+                            fi
+                            # 判断是否为Neighbor
+                            if [ "${is_neighbor}" != "" ]; then
+                                eval output_line_${output_line_num_new}_level=$((output_line_${output_line_num_new}_level + 1))
+                            fi
+                        fi
+                        add_node_num_tmp=$((add_node_num_tmp + 1))
+                    done
+
+                    todo_node_num=$(($todo_node_num - 1))
+                    eval node_${tmp_node_num}_status=1
+                    output_line_num=$((output_line_num + add_node_num))
+                    break
+                fi
+            done
+        fi
+        if [ "$tmp_node_num" != "$node_num" ]; then
+            tmp_node_num=$((tmp_node_num + 1))
+        else
+            tmp_node_num=2
+        fi
+    done
+
+    # 将处理后的结果输出到文件
+    read_line=0
+    output_file="/tmp/mesh_topo.txt"
+    > $output_file
+    while [ "$read_line" -lt "$output_line_num" ]; do
+        read_line=$((read_line+1))
+        eval level=\$output_line_${read_line}_level
+        while [ "$level" -gt 0 ]; do
+            echo -n "    " >> $output_file
+            level=$((level-1))
+        done
+        eval echo "\"\$output_line_$read_line"\" >> $output_file
+    done
+}
+
+#Automatically load controller.
+auto_load() {
+    TARGET="www.baidu.com"
+    # Wait for br-lan to be ready with a timeout of 60 seconds.
+    local timeout=30
+    local elapsed_count=0
+    local eth=$(uci -q get network.wan.device)
+    if [ -z "$eth" ]; then
+        eth=$(uci -q get network.wan4.device)
+    fi
+
+    while true; do
+        # Determine if timeout has occurred.
+        elapsed_count=$((elapsed_count + 1))
+        if [ "$elapsed_count" -ge "$timeout" ]; then
+            echo "wan port did not become ready within $timeout seconds."
+            exit
+        fi
+
+        # Determine if there is an IP.
+        ip_address=$(ifconfig $eth | awk '/inet addr/{print substr($2,6)}')
+        if [ -n "$ip_address" ]; then
+            sleep 6
+            break
+        fi
+        sleep 1
+    done
+    # Ping the target.
+    if ping -c 1 -W 1 $TARGET > /dev/null; then
+        echo "The router is connected to the internet."
+
+        # Enable easymesh.
+        easymesh_enable
+
+        # Set mode to agent.
+        set_management_mode controller
+
+        # Load module.
+        load_module &
+    else
+        echo "The router is not connected to the internet."
+        exit 1
+    fi
+}
+
+# Update wired device connection.
+update_dev() {
+    if [ $# -eq 4 ]; then
+        # Check if there is a management mode set.
+        local is_set_mode=$(uci -q get easymesh.status.is_set_mode)
+        if [ "$1" == "wan" ] && [ "$2" == "up" ] && [ "$is_set_mode" != "true" ]; then
+            auto_load
+            exit 1
+        else
+            if [ "$2" == "up" ]; then
+                if [ "$1" == "wan" ] && grep -q "wan" /opt/easymesh/device_list; then
+                    exit 1
+                elif grep -q "$3" /opt/easymesh/device_list; then
+                    port=$(grep "$3" /opt/easymesh/device_list | awk '{print $4}')
+                    if [ "$port" == "$4" ]; then
+                        exit 1
+                    fi
+                fi
+                echo "$1 $2 $3 $4" >> /opt/easymesh/device_list
+            else
+                # Remove the line containing the port
+                grep -v "$4" /opt/easymesh/device_list > /tmp/device_list.tmp
+                mv /tmp/device_list.tmp /opt/easymesh/device_list
+            fi
+            easymesh_ioctl Agent up_down_notify $1 $2 $3 NULL $4
+        fi
+    else
+        local wan=""
+        local up=""
+        local mac=""
+        local port=""
+        # Read each line from the file and assign values to variables
+        while IFS=' ' read -r wan up mac port; do
+            easymesh_ioctl Agent up_down_notify $wan $up $mac NULL $port
+        done < /opt/easymesh/device_list
+    fi
+}
+
+get_fdb_entry() {
+    sleep 5
+    swconfig dev switch0 port $1 get fdb_entry &
+}
+
+# ========================================================================== Usage ===================================================================================
+usage() {
+    echo "Usage: $0 <command>"
+    echo "Commands:"
+    echo "      enable                                Enable EasyMesh."
+    echo "      disable                               Disable EasyMesh."
+    echo "      set_management_mode <mode>            Set the management mode of EasyMesh to 'controller' or 'agent'."
+    echo "      set_controller_config <fronthual ssid> <fronthaul key> <fronthaul encryption> <backhaul ssid> <backhaul key>   Set the controller configuration."
+    echo "      set_backhaul_form <form>              Set the form of backhaul connections. [wired/wireless-24/wireless-5]"
+    echo "      load [<auto_load>]                    Load drivers based on the current mode. Optional 'auto_load' parameter to automatically load without reloading WiFi."
+    echo "      unload                                Unload drivers based on the current mode."
+    echo "      check_conn_enable                     Check if the connection can be enabled."
+    echo "      check_wps_enable                      Check if WPS can be enabled."
+    echo "      enable_wps                            Enable WPS push button when using wireless networking."
+    echo "      get_conn_status                       Get connection status."
+    echo "      check_can_update_wifi_config          Check if the WiFi configuration can be updated."
+    echo "      set_wifi_config <fronthaul ssid> <fronthaul key> <fronthaul encryption>   Set the SSID、KEY and Encryption for the fronthaul BSS."
+    echo "      update_wifi_config                    Update the SSID、KEY and Encryption of the fronthaul BSS of the Controller and have the Agent synchronize."
+    echo "      wired_to_wireless                     Switch from wired connection to wireless connection."
+    echo "      wireless_to_wired                     Switch from wireless connection to wired connection."
+    echo "      controller_to_agent                   Switch from controller mode to agent mode."
+    echo "      set_backhaul_info <backhaul ssid> <backhaul key>   Save backhaul information for wireless connection."
+    echo "      load_for_web                          Load from web page."
+    echo "      get_topo_for_web                      Web page obtaining topology map."
+    echo "      get_topology                          Obtain topology map."
+    echo "      update_dev                            Update wired device connection."
+}
+
+# ==================================================================== Specific operations ===========================================================================
+case "$1" in
+    # Enable EasyMesh.
+    enable)
+        easymesh_enable
+        ;;
+    # Disable EasyMesh.
+    disable)
+        easymesh_disable
+        ;;
+    # Set the management mode of easymesh, controller of agent.
+    set_management_mode)
+        set_management_mode $2
+        ;;
+    # Set the controller configuration.
+    set_controller_config)
+        set_controller_config $2 $3 $4 $5 $6
+        ;;
+    # Set the form of backhaul connections.
+    set_backhaul_form)
+        set_backhaul_form $2
+        ;;
+    # Laod drivers based on the current mode.
+    load)
+        if [ $# -eq 1 ]; then
+            load_module
+        elif [ $# -eq 2 ]; then
+            load_module $2
+        else
+            echo "Invalid num of parameters: $#"
+        fi
+        ;;
+    # Unlaod drivers based on the current mode.
+    unload)
+        unload_module
+        ;;
+	# Check can be enable connection.
+	check_conn_enable)
+		check_conn_enable
+		;;
+    # Check if WPS can be enabled.
+    check_wps_enable)
+        check_wps_enable
+        ;;
+    # Enable WPS push button when using wireless networking.
+    enable_wps)
+        enable_wps
+        ;;
+    # Get connection status.
+    get_conn_status)
+        get_conn_status
+        ;;
+	# Check can update wifi config.
+	check_can_update_wifi_config)
+		check_can_update_wifi_config
+		;;
+	# Set the Fronthaul BSS's SSID、KEY and Encryption.
+	set_wifi_config)
+		set_wifi_config $2 $3 $4
+		;;
+    # Update the Fronthaul BSS's SSID、KEY and Encryption of the of the Controller and have the Agent synchronize.
+    update_wifi_config)
+        update_wifi_config
+        ;;
+    # Wired connection to wireless connection.
+    wired_to_wireless)
+        wired_to_wireless
+        ;;
+    # Wireless connection to wired connection.
+    wireless_to_wired)
+        wireless_to_wired
+        ;;
+    # Change controller to agent.
+    controller_to_agent)
+        controller_to_agent
+        ;;
+    # Save backhaul information for wireless connection.
+    set_backhaul_info)
+        set_backhaul_info $2 $3
+        ;;
+    # Laod drivers based on the current mode for web use.
+    load_for_web)
+        load_module web &
+        ;;
+    # Get topology file for web use.
+    get_topo_for_web)
+        > /tmp/mesh_topo.txt
+        get_topology
+        ;;
+    get_topology)
+        > /tmp/mesh_topo.txt
+        get_topology
+        cat /tmp/mesh_topo.txt
+        ;;
+    update_ethdev)
+        if [ $# -eq 5 ]; then
+            update_dev $2 $3 $4 $5
+        else
+            update_dev
+        fi
+        ;;
+    get_fdb_entry)
+        get_fdb_entry $2
+        ;;
+    *)
+        echo "Invalid command: $1"
+        usage
+        exit 1
+        ;;
+esac
+
+# ========================================================================= End ================================================================================
