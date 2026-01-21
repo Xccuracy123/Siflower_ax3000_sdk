@@ -2799,6 +2799,7 @@ int32_t ate_main(char *buffer)
 				return -2;
 			goto NEXT;
 		case 'q':
+			g_stop_tx_frame_by_macbypass_flag = true;
 			printf("%s -q param g_stop_tx_frame_by_macbypass_flag=%d\n", __func__, g_stop_tx_frame_by_macbypass_flag);
 			goto NEXT;
 		case 'Y':
